@@ -1,0 +1,4 @@
+<launch>
+  <!-- explore -->
+  <node pkg="acs6121_team23" type="explore.py" name="explore_env" output="screen"></node>
+</launch>
