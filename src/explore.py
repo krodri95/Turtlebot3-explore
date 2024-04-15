@@ -14,6 +14,8 @@ from math import sqrt, pow, pi, degrees                     # import some useful
 
 import os
 import cmath
+import roslaunch
+import signal
 
 max_linear_vel = 0.2 # m/s
 max_angular_vel = 1.0 # rad/s
@@ -129,10 +131,10 @@ class Explore():
 
         # setup a '/cmd_vel' publisher and '/odom' and '/scan' subscribers:
         self.vel_pub = rospy.Publisher("cmd_vel", Twist, queue_size=10)
-        self.odom_sub = rospy.Subscriber("odom", Odometry, self.odom_callback)
+        #self.odom_sub = rospy.Subscriber("odom", Odometry, self.odom_callback)
         self.scan_sub = rospy.Subscriber("scan", LaserScan, self.scan_callback)
 
-        rospy.init_node(node_name, anonymous=True)
+        rospy.init_node(node_name, anonymous=True, disable_signals=True)
         self.rate = rospy.Rate(25)  # hz
 
         # define the robot pose variables and initialise them to zero:
@@ -156,10 +158,23 @@ class Explore():
         # define a Twist message instance, to set robot velocities
         self.vel = Twist()
 
+        # slam mode start() and shutdown()
+        self.slam_launch = None
+        self.launch_slam_node()
+
         self.ctrl_c = False
-        rospy.on_shutdown(self.shutdownhook)
+        #rospy.on_shutdown(self.shutdownhook)
 
         rospy.loginfo(f"the {node_name} node has been initialised...")
+
+        # Register a signal handler for Ctrl+C
+        signal.signal(signal.SIGINT, self.signal_handler)
+
+
+    def signal_handler(self, sig, frame):
+        rospy.loginfo("Shutting down...")
+        # Call the shutdownhook method to save the map and shut down
+        self.shutdownhook()
 
 
     def shutdownhook(self):
@@ -167,7 +182,30 @@ class Explore():
         # (by default all velocities will be zero):
         self.vel_pub.publish(Twist())
         self.ctrl_c = True
-        
+
+        rospy.loginfo("Saving map")
+        self.save_map()
+
+        rospy.loginfo("Shutting down the slam node")
+        self.slam_launch.shutdown()
+
+    
+    def launch_slam_node(self):
+        uuid = roslaunch.rlutil.get_or_generate_uuid(None, False)
+        roslaunch.configure_logging(uuid)
+        file_name = os.path.join(RosPack().get_path('turtlebot3_slam'), 'launch', 'turtlebot3_slam.launch')
+        self.slam_launch = roslaunch.parent.ROSLaunchParent(uuid, [file_name])
+        self.slam_launch.start()
+
+
+    def save_map(self):
+        # get the path of your ros package
+        rp = RosPack()
+        path = rp.get_path('acs6121_team23')
+
+        # save the map of the environment
+        subprocess.run(["rosrun", "map_server", "map_saver", "-f", os.path.join(path, "maps/map")])
+
 
     def main_loop(self):
 
@@ -189,10 +227,3 @@ if __name__ == "__main__":
         node.main_loop()
     except rospy.ROSInterruptException:
         pass
-
-    # get the path of your ros package
-    rp = RosPack()
-    path = rp.get_path('acs6121_team23')
-
-    # save the map of the environment
-    #subprocess.run(["rosrun", "map_server", "map_saver", "-f", os.path.join(path, "maps/map")])
