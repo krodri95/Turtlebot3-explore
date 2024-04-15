@@ -1,31 +1,33 @@
 #!/usr/bin/env python3
 
 import rospy
+from rospkg import RosPack                                  # to find our explorer package path
+import subprocess                                           # run commands in the terminal using python interface
 
-# import the Twist message for publishing velocity commands:
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist                         # import the Twist message for publishing velocity commands
+from nav_msgs.msg import Odometry                           # import the Odometry message for subscribing to the odom topic
+from sensor_msgs.msg import LaserScan                       # import the Laserscan message for subscribing to the scan topic
+from tf.transformations import euler_from_quaternion        # import the function to convert orientation from quaternions to angles
 
-# import the Odometry message for subscribing to the odom topic:
-from nav_msgs.msg import Odometry
+import math
+from math import sqrt, pow, pi, degrees                     # import some useful mathematical operations (and pi), which you may find useful
 
-# import the Laserscan message for subscribing to the scan topic:
-from sensor_msgs.msg import LaserScan
-
-# import the function to convert orientation from quaternions to angles:
-from tf.transformations import euler_from_quaternion
-
-# import some useful mathematical operations (and pi), which you may find useful:
-from math import sqrt, pow, pi
-
-# to find our explorer package path
 import os
-from rospkg import RosPack
+import cmath
 
-# run commands in the terminal using python interface
-import subprocess
+max_linear_vel = 0.2 # m/s
+max_angular_vel = 1.0 # rad/s
+linear_thresh = 0.35 # m
+angular_thresh = 0.4 # m
 
 
 class Explore():
+
+    def lin_vel(self, d):
+        fd = math.tanh(2*d/linear_thresh-2)*max_linear_vel
+        return fd
+
+
     def odom_callback(self, topic_data: Odometry):
         # obtain relevant topic data: pose (position and orientation):
         pose = topic_data.pose.pose
@@ -42,8 +44,7 @@ class Explore():
             [orientation.x, orientation.y, orientation.z, orientation.w], "sxyz"
         )
 
-        # We're only interested in x, y and theta_z
-        # so assign these to class variables (so that we can
+        # assign these to class variables (so that we can
         # access them elsewhere within our Square() class):
         self.x = pos_x
         self.y = pos_y
@@ -61,16 +62,60 @@ class Explore():
             self.y0 = self.y
             self.theta_z0 = self.theta_z
 
-        print(f"Odometry data : x={self.x}, y={self.y}, theta_z={self.theta_z}")
+        #print(f"Odometry data : x={self.x}, y={self.y}, theta_z={self.theta_z}")
 
 
     def scan_callback(self, topic_data: LaserScan):
         # obtain relevant topic data:
         self.ranges = topic_data.ranges
+        self.angle_min = topic_data.angle_min
+        self.angle_max = topic_data.angle_max
+        self.angle_increment = topic_data.angle_increment
         self.range_min = topic_data.range_min
         self.range_max = topic_data.range_max
 
-        print(f"Laser scan data : closest object={min(self.ranges)}")
+        # consider N sections in the lidar range. Detect the closest object in each section if any.
+        N = 24 #For simplicity keep this number multiple of 12
+        step_angle = round(degrees(self.angle_max-self.angle_min))/N
+        ob = [] # store the closest valid object
+        for i in range(N):
+            idx = self.ranges.index(min(self.ranges[int(i*step_angle):int((i+1)*step_angle)]))
+            mod = self.ranges[idx] # modulus of complex number
+            arg = idx*self.angle_increment# argument of complex number
+
+            # Ignore distant objects i.e. larger than 40cm
+            if mod <= angular_thresh:
+                ob.append(cmath.rect(mod, arg))
+    
+        # find the weighted resultant repulsive vector
+        repv = complex(0,0)
+        for j in range(len(ob)):
+            z_opp = cmath.rect(1/abs(ob[j])**2, cmath.phase(ob[j])+pi) # reverse the direction and change the magnitude
+            wt = (1+math.cos(cmath.phase(z_opp) - pi))/2
+            wt = wt if wt > 0 else 0.0
+            z_opp_wt = wt*z_opp # add a weight
+            repv += z_opp_wt
+        
+        eta = 0.25 # scaling factor
+        repv = repv*eta
+        dir_repv = cmath.phase(repv)
+
+        # consider -5deg t0 +5 degree section
+        indices = []
+        for alpha in range(-20, 20, 1):
+            if alpha < 0:
+                alpha = 360+alpha
+            indices.append(alpha)
+
+        # Use a tanh function to reduce the linear velocity of the robot as it approaches an obstacle
+        self.vel.linear.x = self.lin_vel(min([self.ranges[k] for k in indices]))
+ 
+        # Calulate the magnitude and add a sign to control the direction of rotation
+        mag_w = (1-math.cos(dir_repv))/2 * max_angular_vel
+
+        mag_w = mag_w if dir_repv > pi/2 or dir_repv < -pi/2 else 0.0
+        self.vel.angular.z = math.copysign(1, repv.imag) * mag_w
+        #print(f"repulsive vector mag={mag_w}, direction={degrees(dir_repv)}")
 
 
     def __init__(self):
@@ -102,6 +147,9 @@ class Explore():
 
         # define the laser scan variables
         self.ranges = []
+        self.angle_min = 0.0
+        self.angle_max = 0.0
+        self.angle_increment = 0.0
         self.range_min = 0.0
         self.range_max = 0.0
 
@@ -127,8 +175,7 @@ class Explore():
             # here is where your code would go to control the motion of your
             # robot. Add code here to make your robot explorer
 
-
-
+            print(f"linear velocity : {self.vel.linear.x}, angular velocity : {self.vel.angular.z}")
 
             # publish whatever velocity command has been set in your code above:
             self.vel_pub.publish(self.vel)
@@ -148,4 +195,4 @@ if __name__ == "__main__":
     path = rp.get_path('acs6121_team23')
 
     # save the map of the environment
-    subprocess.run(["rosrun", "map_server", "map_saver", "-f", os.path.join(path, "maps/map")])
+    #subprocess.run(["rosrun", "map_server", "map_saver", "-f", os.path.join(path, "maps/map")])
